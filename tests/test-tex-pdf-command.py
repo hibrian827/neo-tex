@@ -40,13 +40,23 @@ with tempfile.TemporaryDirectory(prefix="pdf unsaved's ") as tmp:
     binary = root / 'bin'
     binary.mkdir()
     rendered = root / 'rendered.jsonl'
-    fake = binary / 'zathura'
+    fake = binary / 'SumatraPDF'
     fake.write_text('#!' + sys.executable + '\nimport sys,json,hashlib\nfrom pathlib import Path\n'
                     + f'p=Path({str(rendered)!r})\n'
                     + 'with p.open("a") as out: out.write(json.dumps({"pdf":sys.argv[-1],'
                       '"hash":hashlib.sha256(Path(sys.argv[-1]).read_bytes()).hexdigest()})+"\\n")\n')
     fake.chmod(0o700)
-    env = dict(os.environ, PATH=str(binary) + ':' + os.environ['PATH'], TEX_VIEW_VIEWER='zathura',
+    wrapper = binary / 'tex-view'
+    source = Path(__file__).resolve().parents[1] / 'tex-view.py'
+    wrapper.write_text('#!' + sys.executable + '\nimport runpy,sys\nfrom pathlib import Path\n'
+                       + f'm=runpy.run_path({str(source)!r})\n'
+                       + "g=m['main'].__globals__\ng['SELF']=sys.argv[0]\n"
+                       + f"g['sumatra_executable']=lambda: Path({str(fake)!r})\n"
+                       + f"g['windows_cache']=lambda: Path({str(root / 'windows-cache')!r})\n"
+                       + "g['windows_path']=str\ng['require_sumatra']=lambda: None\n"
+                       + "sys.exit(m['main']())\n")
+    wrapper.chmod(0o700)
+    env = dict(os.environ, PATH=str(binary) + ':' + os.environ['PATH'], TEX_VIEW_VIEWER='sumatra',
                XDG_CACHE_HOME=str(root / 'cache'))
     env.pop('SSH_CONNECTION', None)
     socket = str(root / 'editor.sock')

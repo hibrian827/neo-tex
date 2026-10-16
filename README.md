@@ -6,7 +6,7 @@ Build LaTeX papers in Neovim, view PDFs locally, and jump between PDF text and s
 
 ## Install
 
-Requires Linux or WSL, Python 3, Neovim 0.11+, VimTeX v2.18, and your paper's build tools. The default compiler is `latexmk`. Use SumatraPDF on Windows through WSL, or Zathura on Linux.
+Requires Linux or WSL, Python 3, Neovim 0.11+, VimTeX v2.18, and your paper's build tools. The default compiler is `latexmk`. The viewing machine requires SumatraPDF on Windows through WSL; Linux servers can build and send PDFs through the SSH bridge.
 
 ```sh
 git clone https://github.com/hibrian827/neo-tex.git
@@ -35,7 +35,7 @@ For SumatraPDF, run this in WSL, then restart Neovim:
 tex-view install-sumatra
 ```
 
-This installs a portable viewer without changing Windows file associations. To use Zathura instead, set `TEX_VIEW_VIEWER=zathura`.
+This installs a portable viewer without changing Windows file associations. SumatraPDF is required on the viewing machine; missing viewer or Windows interop produces an error before a watcher or bridge starts. There is no Linux viewer fallback.
 
 ## Use
 
@@ -50,7 +50,7 @@ Open a `.tex` file in Neovim:
 
 After `:pdf`, saving rebuilds the PDF. `:wq` completes a final build before exiting. Unrelated buffers stay unsaved; failed saves or builds cancel viewing.
 
-**Double-click** PDF text in SumatraPDF, or **Ctrl+click** in Zathura, to return to its source. Navigation reuses editor panes. Reopening a previously viewed project reconnects its existing PDF; closing a PDF keeps it closed until you request it again.
+**Double-click** PDF text in SumatraPDF to return to its source. Navigation reuses editor panes. Reopening a previously viewed project reconnects its existing PDF; closing a PDF keeps it closed until you request it again.
 
 ## Project build command
 
@@ -118,7 +118,7 @@ programs.neo-tex.enable = true;
 programs.neo-tex.wsl.enable = true; # local WSL only
 ```
 
-This installs the helper, Neovim files, and TeX Live medium. The WSL option adds Zathura and the SSH wrapper. Configure VimTeX as above; install SumatraPDF separately if wanted.
+This installs the helper, Neovim files, and TeX Live medium. The WSL option adds the SSH wrapper. Configure VimTeX as above; install SumatraPDF separately if wanted.
 
 ## Troubleshooting and tests
 

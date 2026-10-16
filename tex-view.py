@@ -17,6 +17,7 @@ import signal
 import subprocess
 import sys
 import time
+import tempfile
 import uuid
 
 CACHE = Path(os.environ.get('XDG_CACHE_HOME', str(Path.home() / '.cache'))) / 'tex-view'
@@ -65,6 +66,8 @@ def request(data, resume=False):
         return False
     if not Path(data['pdf']).is_file():
         raise ValueError('Compile the document before opening its PDF.')
+    if not data.get('remote'):
+        require_sumatra()
     data.update(id=uuid.uuid4().hex, time=time.time(), reconnect=resume)
     write_json(path, data)
     if not data.get('remote'):
@@ -186,8 +189,6 @@ def windows_cache():
 
 
 def sumatra_executable():
-    if os.environ.get('TEX_VIEW_VIEWER') == 'zathura':
-        return None
     configured = os.environ.get('TEX_VIEW_SUMATRA')
     if configured:
         if not Path(configured).is_file():
@@ -199,6 +200,50 @@ def sumatra_executable():
         if exe.is_file():
             return exe
     return None
+
+
+def require_sumatra():
+    """Fail synchronously before spawning a local watcher or remote bridge."""
+    try:
+        if os.environ.get('TEX_VIEW_VIEWER', 'sumatra') != 'sumatra':
+            raise ValueError('Only SumatraPDF is supported; unset TEX_VIEW_VIEWER.')
+        exe = sumatra_executable()
+        if exe is None:
+            raise ValueError('SumatraPDF was not found. Run ./run.sh install or tex-view install-sumatra in WSL.')
+        if not os.access(exe, os.X_OK):
+            raise ValueError(f'SumatraPDF is not executable: {exe}')
+        with exe.open('rb') as binary:
+            if binary.read(2) != b'MZ':
+                raise ValueError(f'SumatraPDF is not a Windows executable: {exe}')
+        # Check Windows interop and the writable Windows cache before backgrounding.
+        subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', 'exit 0'],
+                       check=True, capture_output=True, timeout=10)
+        folder = directory(windows_cache())
+        windows_path(folder)
+        # Render a tiny blank PDF without opening a window to check the actual executable.
+        objects = [b'<< /Type /Catalog /Pages 2 0 R >>',
+                   b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+                   b'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] >>']
+        content = b'%PDF-1.4\n'
+        offsets = []
+        for number, obj in enumerate(objects, 1):
+            offsets.append(len(content))
+            content += f'{number} 0 obj\n'.encode() + obj + b'\nendobj\n'
+        start = len(content)
+        content += b'xref\n0 4\n0000000000 65535 f \n'
+        content += b''.join(f'{offset:010d} 00000 n \n'.encode() for offset in offsets)
+        content += f'trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n'.encode()
+        with tempfile.TemporaryDirectory(prefix='.probe-', dir=folder) as temporary:
+            probe = Path(temporary) / 'probe.pdf'
+            probe.write_bytes(content)
+            result = subprocess.run([str(exe), '-bench', windows_path(probe), '1'],
+                                    capture_output=True, timeout=10)
+            # Sumatra 3.6.1's benchmark exits with its default code of 1.
+            if result.returncode not in (0, 1):
+                raise RuntimeError(f'SumatraPDF could not run (exit {result.returncode}).')
+        return exe
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        raise RuntimeError(f'PDF preview unavailable: {error}') from error
 
 
 def install_sumatra():
@@ -259,17 +304,6 @@ def sumatra_editor(folder, metadata):
     return editor
 
 
-def zathura_pid(pdf):
-    for entry in Path('/proc').glob('[0-9]*/cmdline'):
-        try:
-            args = entry.read_bytes().split(b'\0')
-            if args and b'zathura' in args[0] and b'--synctex-pid' not in args and str(pdf).encode() in args:
-                return int(entry.parent.name)
-        except OSError:
-            continue
-    return None
-
-
 class Viewer:
     def __init__(self, ident, host=None):
         self.folder = directory(CACHE / 'viewers' / ident)
@@ -277,6 +311,8 @@ class Viewer:
         self.process = None
         self.last_request = None
         self.sumatra = sumatra_executable()
+        if self.sumatra is None:
+            raise RuntimeError('PDF preview unavailable: SumatraPDF was not found.')
         self.windows_stamp = None
         self.windows_folder = None
         self.launchers = []
@@ -341,8 +377,6 @@ class Viewer:
 
     def update(self, data, pdf):
         self.reap()
-        if not self.sumatra and data['id'] == self.last_request:
-            return
         record = dict(data)
         if pdf != Path(data['pdf']):
             record['cache_dir'] = str(pdf.parent)
@@ -351,29 +385,11 @@ class Viewer:
                           ssh_options=ssh_options(),
                           local_tmux=os.environ.get('TEX_VIEW_TMUX'), local_pane=os.environ.get('TEX_VIEW_PANE'))
         metadata = self.folder / 'callback.json'
-        if self.sumatra:
-            self.update_sumatra(data, pdf, record, metadata)
-            return
-        self.last_request = data['id']
-        write_json(metadata, record)
-        if data.get('reconnect'):
-            return
-        forward = f"{data['line']}:1:{data['source']}"
-        pid = self.process.pid if self.process and self.process.poll() is None else zathura_pid(pdf)
-        if pid:
-            subprocess.run(['zathura', '--synctex-forward', forward,
-                            '--synctex-pid', str(pid), str(pdf)],
-                           capture_output=True, timeout=10)
-            return
-        # Zathura parses argv before substituting SyncTeX placeholders.
-        editor = shlex.join([SELF, 'callback', str(metadata)]) + ' %{input} %{line}'
-        self.process = subprocess.Popen(['zathura', '--synctex-editor-command', editor,
-                                         '--synctex-forward', forward, str(pdf)],
-                                        stdin=subprocess.DEVNULL)
-        self.launchers.append(self.process)
+        self.update_sumatra(data, pdf, record, metadata)
 
 
 def watch(path):
+    require_sumatra()
     guard = lock(key(str(path)))
     # A former editor's watcher may be exiting just as a reopened editor resumes.
     for _ in range(10):
@@ -458,6 +474,7 @@ def serve():
 
 
 def bridge(host, managed=False):
+    require_sumatra()
     guard = lock('bridge-' + key(connection_name(host)))
     if not guard:
         raise RuntimeError('A PDF bridge for this server is already running.')
@@ -549,6 +566,11 @@ def stop_managed(state):
 
 
 def managed_ssh(host, args, options=None):
+    try:
+        require_sumatra()
+    except RuntimeError as error:
+        print(f'tex-view: {error}; SSH will continue without a PDF bridge.', file=sys.stderr)
+        return subprocess.call(args)
     options = [] if options is None else options
     folder = session_directory(host, options)
     lease = folder / (uuid.uuid4().hex + '.lease')

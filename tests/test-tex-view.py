@@ -26,15 +26,39 @@ class BridgeTests(unittest.TestCase):
         self.cache = patch.object(tex, 'CACHE', self.root / 'cache')
         self.cache.start()
         self.addCleanup(self.cache.stop)
-        backend = patch.object(tex, 'sumatra_executable', return_value=None)
+        backend = patch.object(tex, 'sumatra_executable', return_value=self.root / 'SumatraPDF.exe')
         backend.start()
         self.addCleanup(backend.stop)
+        for mock in (patch.object(tex, 'require_sumatra'),
+                     patch.object(tex, 'windows_cache', return_value=self.root / 'win-cache'),
+                     patch.object(tex, 'windows_path', side_effect=lambda p: 'C:/' + Path(p).name)):
+            mock.start()
+            self.addCleanup(mock.stop)
         self.pdf = self.root / 'main paper.pdf'
         self.pdf.write_bytes(b'%PDF-1.5\ncontent\n%%EOF\n')
         self.socket = self.root / 'editor.sock'
         self.socket.touch()
         self.data = dict(pdf=str(self.pdf), root=str(self.root), source=str(self.root / "chapter's file.tex"),
                          server=str(self.socket), line=3, remote=True, id='one', time=1)
+
+    def test_unavailable_viewer_rejects_local_request_before_spawning(self):
+        for reason in ('SumatraPDF missing', 'Windows interop unavailable', 'executable cannot run'):
+            with self.subTest(reason=reason), \
+                 patch.object(tex, 'require_sumatra', side_effect=RuntimeError(reason)), \
+                 patch.object(tex.subprocess, 'Popen') as launch:
+                with self.assertRaisesRegex(RuntimeError, reason):
+                    tex.request(dict(self.data, remote=False))
+                launch.assert_not_called()
+                self.assertEqual(list((tex.CACHE / 'requests').glob('*.json')), [])
+
+    def test_unavailable_viewer_skips_bridge_but_preserves_ssh(self):
+        with patch.object(tex, 'require_sumatra', side_effect=RuntimeError('missing viewer')), \
+             patch.object(tex.subprocess, 'Popen') as launch, \
+             patch.object(tex.subprocess, 'call', return_value=0) as ssh:
+            self.assertEqual(tex.managed_ssh('host', ['ssh', 'host']), 0)
+            launch.assert_not_called()
+            ssh.assert_called_once_with(['ssh', 'host'])
+            self.assertFalse((tex.CACHE / 'ssh-sessions').exists())
 
     def test_explicit_request_only_opens_once_even_after_close(self):
         with patch.object(tex.subprocess, 'Popen') as launch, patch.object(tex.subprocess, 'run'):

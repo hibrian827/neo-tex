@@ -20,7 +20,6 @@ in {
       home.file.".config/nvim/autoload/vimtex/view/texbridge.vim".source = ./nvim/autoload/vimtex/view/texbridge.vim;
     }
     (lib.mkIf cfg.wsl.enable {
-      home.packages = [ pkgs.zathura ];
       programs.zsh.shellAliases.pdf = "tex-view bridge";
       programs.zsh.initContent = lib.mkAfter ''
         ssh() {

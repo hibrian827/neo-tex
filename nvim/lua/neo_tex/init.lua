@@ -266,6 +266,10 @@ function M.resume()
   local request = request_data(vim.fn.eval("b:vimtex.viewer.out()"))
   vim.system({ "tex-view", "resume" }, { stdin = vim.json.encode(request), text = true }, function(result)
     vim.schedule(function()
+      if result.code ~= 0 then
+        vim.notify(result.stderr, vim.log.levels.ERROR)
+        return
+      end
       if result.code == 0 and vim.trim(result.stdout) == "1" and vim.api.nvim_buf_is_valid(buf) then
         vim.api.nvim_buf_call(buf, function()
           if vim.b.vimtex and vim.b.vimtex.id == state then
