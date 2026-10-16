@@ -1,4 +1,4 @@
-# tex-workflow
+# neo-tex
 
 LaTeX project builds, Neovim navigation, and local or remote PDF viewing.
 
@@ -11,9 +11,9 @@ viewing also needs SSH and the helper on the remote machine.
 For Home Manager, import `home-manager.nix` and enable:
 
 ```nix
-imports = [ /path/to/tex-workflow/home-manager.nix ];
-programs.tex-workflow.enable = true;
-programs.tex-workflow.wsl.enable = true; # local WSL only
+imports = [ /path/to/neo-tex/home-manager.nix ];
+programs.neo-tex.enable = true;
+programs.neo-tex.wsl.enable = true; # local WSL only
 ```
 
 Apply Home Manager on each machine. This installs the helper, TeX Live medium,
@@ -25,7 +25,7 @@ Load VimTeX through your plugin manager, with this lazy.nvim specification:
   "lervag/vimtex",
   tag = "v2.18",
   lazy = false,
-  init = function() require("tex_workflow").setup() end,
+  init = function() require("neo_tex").setup() end,
 }
 ```
 
@@ -35,7 +35,7 @@ Without Home Manager, from this checkout:
 mkdir -p ~/.local/bin ~/.config/nvim/lua ~/.config/nvim/autoload/vimtex/view
 ln -s "$PWD/tex-view.py" ~/.local/bin/tex-view
 ln -s "$PWD/tex-ssh" ~/.local/bin/tex-ssh
-ln -s "$PWD/nvim/lua/tex_workflow" ~/.config/nvim/lua/tex_workflow
+ln -s "$PWD/nvim/lua/neo_tex" ~/.config/nvim/lua/neo_tex
 ln -s "$PWD/nvim/autoload/vimtex/view/texbridge.vim" ~/.config/nvim/autoload/vimtex/view/texbridge.vim
 ```
 
@@ -55,7 +55,7 @@ ssh() {
 
 ## Project layout and development
 
-- `nvim/lua/tex_workflow/init.lua`: project discovery, saving, compilation,
+- `nvim/lua/neo_tex/init.lua`: project discovery, saving, compilation,
   build scheduling, editor lifecycle, and inverse navigation.
 - `nvim/autoload/vimtex/view/texbridge.vim`: VimTeX viewer adapter and PDF path selection.
 - `tex-view.py`: PDF/SyncTeX publication, viewer lifecycle, hidden Windows callbacks,
@@ -260,8 +260,8 @@ nvim --headless -u NONE -l tests/test-tex-navigation.lua
 python3 tests/test-sumatra-workflow.py        # local Windows viewer + editor restart
 python3 tests/test-tex-save-quit.py           # final build after :wq
 python3 tests/test-tex-save-quit.py Cyclonus  # requires a running local Cyclonus bridge
-TEX_VIEW_VIEWER=zathura python3 tests/test-tex-workflow.py            # local WSLg integration test
-TEX_VIEW_VIEWER=zathura python3 tests/test-tex-workflow.py Cyclonus   # remote integration test
+TEX_VIEW_VIEWER=zathura python3 tests/test-neo-tex.py            # local WSLg integration test
+TEX_VIEW_VIEWER=zathura python3 tests/test-neo-tex.py Cyclonus   # remote integration test
 ```
 
 Integration tests create disposable papers and isolated tmux sessions, open PDF

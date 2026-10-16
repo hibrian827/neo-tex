@@ -13,5 +13,5 @@ function! s:viewer._check() abort
   return executable('tex-view')
 endfunction
 function! s:viewer._start(file) dict abort
-  call luaeval("require('tex_workflow').view(_A)", a:file)
+  call luaeval("require('neo_tex').view(_A)", a:file)
 endfunction

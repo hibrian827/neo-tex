@@ -90,7 +90,7 @@ def inverse(data, filename, line):
     elif not source.is_absolute():
         source = Path(data['root']) / source
     args = json.dumps([str(source), int(line)])
-    expression = "luaeval(\"require('tex_workflow').inverse(_A)\", json_decode('%s'))" % args.replace("'", "''")
+    expression = "luaeval(\"require('neo_tex').inverse(_A)\", json_decode('%s'))" % args.replace("'", "''")
     result = subprocess.run(['nvim', '--server', data['server'], '--remote-expr', expression],
                             capture_output=True, text=True, timeout=10)
     if result.returncode:

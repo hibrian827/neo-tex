@@ -1,8 +1,8 @@
 { config, lib, pkgs, ... }:
 let
-  cfg = config.programs.tex-workflow;
+  cfg = config.programs.neo-tex;
 in {
-  options.programs.tex-workflow = {
+  options.programs.neo-tex = {
     enable = lib.mkEnableOption "LaTeX builds and local/remote PDF viewing";
     wsl.enable = lib.mkEnableOption "WSL viewer and automatic SSH bridge integration";
   };
@@ -16,7 +16,7 @@ in {
         (pkgs.writeShellScriptBin "tex-ssh" ''exec tex-view ssh "$@"'')
         pkgs.texlive.combined.scheme-medium
       ];
-      home.file.".config/nvim/lua/tex_workflow".source = ./nvim/lua/tex_workflow;
+      home.file.".config/nvim/lua/neo_tex".source = ./nvim/lua/neo_tex;
       home.file.".config/nvim/autoload/vimtex/view/texbridge.vim".source = ./nvim/autoload/vimtex/view/texbridge.vim;
     }
     (lib.mkIf cfg.wsl.enable {

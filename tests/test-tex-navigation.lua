@@ -1,5 +1,5 @@
 -- Run from the repository root: nvim --headless -u NONE -l tests/test-tex-navigation.lua
-local tex = dofile("nvim/lua/tex_workflow/init.lua")
+local tex = dofile("nvim/lua/neo_tex/init.lua")
 local root = vim.fn.tempname()
 vim.fn.mkdir(root, "p")
 local main = root .. "/main.tex"
@@ -14,6 +14,7 @@ local ok, err = pcall(function()
   local original_open = tex.open
   tex.open = function() views = views + 1 end
   tex.setup()
+  assert(require("tex_workflow") == tex, "legacy viewer callbacks lost their Lua module alias")
   vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(":pdf<CR>", true, false, true), "xt", false)
   assert(views == 1, "lowercase :pdf did not dispatch to the PDF viewer")
   vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(":let g:pdf_test_text = 'pdf'<CR>", true, false, true), "xt", false)

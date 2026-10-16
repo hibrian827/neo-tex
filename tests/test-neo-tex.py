@@ -1,7 +1,7 @@
 """Exercise the installed local/remote workflow with a disposable multi-file paper.
 
 Requires WSLg and gdbus locally. Opens temporary PDF windows, then closes them.
-Usage: python3 tests/test-tex-workflow.py [SSH_HOST]
+Usage: python3 tests/test-neo-tex.py [SSH_HOST]
 """
 import json
 import os

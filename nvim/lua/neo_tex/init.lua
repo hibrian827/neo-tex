@@ -78,6 +78,8 @@ local function queue_build(buf)
 end
 
 function M.setup()
+  -- Older cached viewer callbacks can still use the former Lua module name.
+  package.loaded.tex_workflow = M
   vim.api.nvim_create_user_command("Pdf", function() M.open() end,
     { desc = "Save the LaTeX project, compile, and open its PDF", force = true })
   -- Neovim user-command names require an uppercase first letter. Only expand
@@ -86,7 +88,7 @@ function M.setup()
   vim.g.vimtex_view_method = "texbridge"
   vim.g.vimtex_view_automatic = 0
   vim.cmd([[function! TexBuildCompiler(main) abort
-    return luaeval("require('tex_workflow').compiler_method(_A)", a:main)
+    return luaeval("require('neo_tex').compiler_method(_A)", a:main)
   endfunction]])
   vim.g.vimtex_compiler_method = "TexBuildCompiler"
   vim.g.vimtex_compiler_latexmk = { continuous = 1 }
