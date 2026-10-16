@@ -32,7 +32,8 @@ with tempfile.TemporaryDirectory(prefix="pdf unsaved's ") as tmp:
             'try:\n'
             ' with open("builds.log","a") as f: f.write("start\\n")\n'
             ' time.sleep(.5)\n'
-            ' subprocess.run(["latexmk","-pdf","-synctex=1","-interaction=nonstopmode","-outdir=build","p.tex"],check=True)\n'
+            ' Path("build").mkdir(exist_ok=True)\n'
+            ' subprocess.run(["pdflatex","-halt-on-error","-synctex=1","-interaction=nonstopmode","-output-directory=build","p.tex"],check=True)\n'
             'finally:\n'
             ' os.close(fd)\n Path("building.lock").unlink()\n'
             ' with open("builds.log","a") as f: f.write("end\\n")\n')
@@ -112,6 +113,28 @@ with tempfile.TemporaryDirectory(prefix="pdf unsaved's ") as tmp:
             assert (root / 'builds.log').read_text().count('start\n') == 3
             print('PASS per-project Makefile, custom PDF path, chapter detection, serialized queued saves, and VimtexStop')
 
+            other = root / 'other'
+            other.mkdir()
+            (other / 'main.tex').write_text('\\documentclass{article}\n\\begin{document}Other paper.\\end{document}\n')
+            (other / '.texbuild.json').write_text(json.dumps({
+                'main': 'main.tex', 'command': 'printf other > command-used', 'pdf': 'different.pdf'}))
+            command('edit ' + str(other / 'main.tex').replace(' ', '\\ '))
+            command('VimtexCompile')
+            wait((other / 'command-used').exists)
+            command('edit ' + str(chapter).replace(' ', '\\ '))
+            assert 'make paper' in expr('b:vimtex.compiler.command')
+
+            broken = root / 'broken'
+            broken.mkdir()
+            (broken / 'main.tex').write_text((other / 'main.tex').read_text())
+            (broken / '.texbuild.json').write_text('{"main":"main.tex", "pdf":"main.pdf"}')
+            command('silent! edit ' + str(broken / 'main.tex').replace(' ', '\\ '))
+            assert expr('b:vimtex.compiler.name') == 'generic'
+            assert expr('b:vimtex.compiler.command') == 'false'
+            pdf('command must be a nonempty string')
+            command('edit ' + str(chapter).replace(' ', '\\ '))
+            print('PASS separate projects retain separate commands; invalid config cannot fall back to latexmk')
+
         expr("luaeval(\"vim.api.nvim_buf_set_lines(0, -1, -1, false, {string.char(92)..'undefinedCommandForTest'})\")")
         before = rendered.read_text()
         pdf('compilation failed')
@@ -138,7 +161,9 @@ with tempfile.TemporaryDirectory(prefix="pdf unsaved's ") as tmp:
             assert 'Stopped Makefile edit.' in chapter.read_text()
             assert 'Saved chapter-buffer edit.' in subprocess.check_output(['pdftotext', str(output), '-'], text=True)
             print('PASS save-and-quit finishes the configured Makefile build')
-    except Exception:
+    except Exception as error:
+        if isinstance(error, subprocess.CalledProcessError):
+            print(error.output, file=sys.stderr)
         print((root / 'editor.log').read_text(errors='replace'), file=sys.stderr)
         raise
     finally:

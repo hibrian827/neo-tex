@@ -32,7 +32,7 @@ function M.prepare()
   vim.b.texbuild = config
   if config then
     if config.error then
-      vim.notify(config.error, vim.log.levels.ERROR)
+      vim.schedule(function() vim.notify(config.error, vim.log.levels.ERROR) end)
     else
       vim.b.vimtex_main = config.main
     end
@@ -103,6 +103,10 @@ function M.setup()
         vim.api.nvim_buf_create_user_command(buf, "VimtexStop", function()
           if vim.b.vimtex then custom_active[vim.fs.normalize(vim.b.vimtex.tex)] = nil end
           vim.fn["vimtex#compiler#stop"]()
+        end, {})
+        vim.api.nvim_buf_create_user_command(buf, "VimtexStopAll", function()
+          custom_active = {}
+          vim.fn["vimtex#compiler#stop_all"]()
         end, {})
       end
       vim.schedule(function()
@@ -250,6 +254,7 @@ function M.finish()
 end
 
 function M.resume()
+  if vim.b.texbuild and vim.b.texbuild.error then return end
   if not vim.b.vimtex or vim.fn.eval('get(b:vimtex, "tex_view_attach_checked", 0)') == 1 then
     return
   end
