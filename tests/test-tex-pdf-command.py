@@ -97,6 +97,13 @@ with tempfile.TemporaryDirectory(prefix="pdf unsaved's ") as tmp:
         render = json.loads(rendered.read_text().splitlines()[0])
         assert render['hash'] == hashlib.sha256(output.read_bytes()).hexdigest()
         print('PASS lowercase :pdf saves modified main/chapter buffers, leaves unrelated notes unsaved, builds first PDF, then renders')
+        metadata = next((root / 'cache/tex-view/viewers').glob('*/callback.json'))
+        command('edit ' + str(main).replace(' ', '\\ '))
+        subprocess.run(['tex-view', 'callback', str(metadata), str(chapter), '2'], env=env, check=True, timeout=15)
+        assert expr('expand("%:p")') == str(chapter)
+        assert expr('line(".")') == '2'
+        assert expr('winnr("$")') == '1'
+        print('PASS helper inverse callback loads the standalone Neovim module and returns to the chapter')
 
         if custom:
             assert expr('b:vimtex.tex') == str(main)
