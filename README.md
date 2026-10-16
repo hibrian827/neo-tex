@@ -8,28 +8,13 @@ Requirements: Linux (WSL for SumatraPDF), Python 3, Neovim 0.11+, VimTeX v2.18,
 and your project's build tools. Zathura is the Linux viewer fallback. Remote
 viewing also needs SSH and the helper on the remote machine.
 
-For Home Manager, import `home-manager.nix` and enable:
+**Nix and NixOS are not required.** Install the dependencies with your usual
+package manager, then follow the manual setup below. Home Manager integration
+is available as an optional installation method.
 
-```nix
-imports = [ /path/to/neo-tex/home-manager.nix ];
-programs.neo-tex.enable = true;
-programs.neo-tex.wsl.enable = true; # local WSL only
-```
+### Manual installation
 
-Apply Home Manager on each machine. This installs the helper, TeX Live medium,
-and Neovim Lua/viewer files; the WSL option adds Zathura and the zsh SSH wrapper.
-Load VimTeX through your plugin manager, with this lazy.nvim specification:
-
-```lua
-{
-  "lervag/vimtex",
-  tag = "v2.18",
-  lazy = false,
-  init = function() require("neo_tex").setup() end,
-}
-```
-
-Without Home Manager, from this checkout:
+Clone this repository and run the following commands from its root:
 
 ```sh
 mkdir -p ~/.local/bin ~/.config/nvim/lua ~/.config/nvim/autoload/vimtex/view
@@ -40,7 +25,7 @@ ln -s "$PWD/nvim/autoload/vimtex/view/texbridge.vim" ~/.config/nvim/autoload/vim
 ```
 
 Keep this checkout in place and put `~/.local/bin` on PATH. For automatic SSH
-bridges without Home Manager, add this to local WSL `~/.zshrc`:
+bridges, add this to local WSL `~/.zshrc`:
 
 ```zsh
 alias pdf='tex-view bridge'
@@ -52,6 +37,32 @@ ssh() {
   fi
 }
 ```
+
+Load VimTeX through your plugin manager, with this lazy.nvim specification:
+
+```lua
+{
+  "lervag/vimtex",
+  tag = "v2.18",
+  lazy = false,
+  init = function() require("neo_tex").setup() end,
+}
+```
+
+### Optional: Nix / Home Manager
+
+If you already use Home Manager, import `home-manager.nix` and enable:
+
+```nix
+imports = [ /path/to/neo-tex/home-manager.nix ];
+programs.neo-tex.enable = true;
+programs.neo-tex.wsl.enable = true; # local WSL only
+```
+
+Apply Home Manager on each machine. This installs the helper, TeX Live medium,
+and Neovim Lua/viewer files; the WSL option adds Zathura and the zsh SSH wrapper.
+Configure VimTeX with the plugin specification above. Home Manager can be used
+on an existing Linux distribution or WSL; the NixOS operating system is not needed.
 
 ## Project layout and development
 
@@ -97,8 +108,7 @@ launcher, so navigation does not flash a console window.
 The helper remembers the executable in `~/.config/tex-view/sumatra.json`.
 To select another executable, set `TEX_VIEW_SUMATRA` to its WSL path. To force
 Zathura, launch Neovim (or the remote bridge) with `TEX_VIEW_VIEWER=zathura`.
-The portable Windows installation is separate from Nix and must be repeated on
-each Windows device. Existing remote servers do not need redeployment solely
+Install the portable Windows viewer separately on each Windows device. Existing remote servers do not need redeployment solely
 to change the local viewer.
 
 | Action inside Neovim | Command |
@@ -245,9 +255,9 @@ Logs: `~/.cache/tex-view/local.log` for local viewing and
 `~/.cache/tex-view/bridge-*.log` for bridges launched by `tex-ssh`. A standalone
 bridge prints diagnostics in its terminal. An active Neovim session is required;
 Zathura additionally needs WSLg, and remote viewing needs working SSH authentication.
-TeX Live's medium scheme is installed;
-papers requiring additional classes/packages may need additions to the Nix TeX
-package selection.
+Install any additional TeX classes or packages required by your paper using your
+TeX distribution's package tools. The optional Home Manager module supplies TeX
+Live's medium scheme; users of that module can extend its Nix TeX package selection.
 
 Regression checks:
 
