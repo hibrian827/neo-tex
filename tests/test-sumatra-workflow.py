@@ -4,6 +4,7 @@ Requires installed tex-view, SumatraPDF, Neovim and latexmk. Opens a disposable
 PDF window; closes only its own Sumatra process and editors on completion.
 """
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -156,6 +157,16 @@ with tempfile.TemporaryDirectory(prefix="sumatra reopen's ") as tmp:
                    "ForEach-Object {Stop-Process -Id $_.ProcessId}")
         stop_editor()
         wait(lambda: viewer_process() == '', 'test PDF closes')
+        def watcher_stopped():
+            lock = Path.home() / '.cache/tex-view/locks' / ident
+            with lock.open('a') as handle:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return False
+                return True
+        wait(watcher_stopped, 'watcher stops after both editor and PDF close')
+        print('PASS watcher automatically exits after both editor and PDF close')
         start_editor(3)
         wait(lambda: json.loads(metadata.read_text())['server'] == socket, 'closed viewer project reattaches')
         wait(lambda: expr('b:vimtex.compiler.is_running() ? 1 : 0') == '1', 'preview compilation resumes')

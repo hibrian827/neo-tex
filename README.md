@@ -50,6 +50,26 @@ Open a `.tex` file in Neovim:
 
 After `:pdf`, saving rebuilds the PDF. `:wq` completes a final build before exiting. Unrelated buffers stay unsaved; failed saves or builds cancel viewing.
 
+After Neovim exits, the local watcher continues copying rebuilt PDFs and SyncTeX
+files into SumatraPDF's cache. For example, running `make` externally refreshes an
+already-open preview. This does not compile source edits automatically. Closing
+the PDF does not reopen it on the next build, and inverse search requires Neovim.
+The watcher stops automatically once no attached Neovim session has a buffer for
+the project and the PDF is closed in SumatraPDF. Checks run every few seconds,
+with a short grace period for startup and reloads. Multiple editors and background
+PDF tabs are tracked. If Windows cannot report the viewer state, watching continues
+until the state can be confirmed or you stop it explicitly.
+To stop watching a document, run `tex-view stop /path/to/p.pdf` on the machine
+where the original PDF is built. Run `:pdf` again to resume watching. Local watchers
+do not survive a WSL shutdown.
+
+Remote previews keep refreshing after Neovim exits while their existing SSH bridge
+remains connected. Keep that SSH session open, or use a separate
+`tex-view bridge SERVER` session started before requesting the preview. Disconnecting
+the bridge ends the subscription; reconnect and run `:pdf` to subscribe again.
+Unused remote documents are unsubscribed automatically under the same rule; the
+shared bridge remains available for other documents and future preview requests.
+
 **Double-click** PDF text in SumatraPDF to return to its source. Navigation reuses editor panes. Reopening a previously viewed project reconnects its existing PDF; closing a PDF keeps it closed until you request it again.
 
 ## Project build command

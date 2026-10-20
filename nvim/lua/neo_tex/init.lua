@@ -151,6 +151,7 @@ local function request_data(pdf)
     source = vim.api.nvim_buf_get_name(0),
     line = vim.api.nvim_win_get_cursor(0)[1],
     server = vim.v.servername,
+    main = vim.b.vimtex.tex,
     remote = vim.env.SSH_CONNECTION ~= nil,
     tmux = vim.env.TMUX,
     pane = vim.env.TMUX_PANE,

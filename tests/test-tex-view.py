@@ -4,6 +4,7 @@ import json
 import gzip
 import os
 import signal
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -41,6 +42,97 @@ class BridgeTests(unittest.TestCase):
         self.data = dict(pdf=str(self.pdf), root=str(self.root), source=str(self.root / "chapter's file.tex"),
                          server=str(self.socket), line=3, remote=True, id='one', time=1)
 
+    def test_all_attached_editors_are_retained(self):
+        second = self.root / 'second.sock'
+        second.touch()
+        tex.request(dict(self.data))
+        tex.request(dict(self.data, server=str(second)))
+        path = tex.CACHE / 'requests' / (tex.key(str(self.pdf)) + '.json')
+        data = json.loads(path.read_text())
+        self.assertEqual({e['server'] for e in data['editors']}, {str(self.socket), str(second)})
+        second.unlink()  # The latest editor exits; the first still references the PDF.
+        self.assertTrue(tex.serving(data))
+        self.socket.unlink()
+        self.assertFalse(tex.serving(data))
+
+    def test_editor_buffer_reference_and_rpc_failure(self):
+        entry = dict(server=str(self.socket), main=str(self.root / "paper's main.tex"))
+        tex.EDITOR_CHECKS.clear()
+        with patch.object(tex.subprocess, 'run', return_value=Mock(returncode=0, stdout='0')):
+            self.assertFalse(tex.editor_references(entry))
+        tex.EDITOR_CHECKS.clear()
+        with patch.object(tex.subprocess, 'run', return_value=Mock(returncode=0, stdout='1')):
+            self.assertTrue(tex.editor_references(entry))
+
+        tex.EDITOR_CHECKS.clear()
+        with patch.object(tex.subprocess, 'run', side_effect=subprocess.TimeoutExpired('nvim', 3)):
+            self.assertTrue(tex.editor_references(entry))
+
+    @unittest.skipUnless(shutil.which('nvim'), 'Neovim is required for the RPC test')
+    def test_real_editor_reference_disappears_after_buffer_wipe(self):
+        socket = str(self.root / 'real-editor.sock')
+        main = str(self.root / "paper's main.tex")
+        process = subprocess.Popen(['nvim', '--clean', '--headless', '--listen', socket,
+                                    '-c', 'lua vim.b.vimtex = {tex = vim.env.NEO_TEX_TEST_MAIN}'],
+                                   env=dict(os.environ, NEO_TEX_TEST_MAIN=main),
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline = time.monotonic() + 5
+            while not Path(socket).exists() and time.monotonic() < deadline:
+                time.sleep(.02)
+            entry = dict(server=socket, main=main)
+            tex.EDITOR_CHECKS.clear()
+            self.assertTrue(tex.editor_references(entry))
+            subprocess.run(['nvim', '--server', socket, '--remote-expr', "execute('enew | bwipeout 1')"],
+                           capture_output=True, check=True, timeout=5)
+            tex.EDITOR_CHECKS.clear()
+            self.assertFalse(tex.editor_references(entry))
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
+    def test_unused_requires_both_closed_and_grace_period(self):
+        with patch.object(tex.time, 'monotonic', return_value=0):
+            viewer = tex.Viewer('lifecycle')
+        with patch.object(tex, 'pdf_is_open', return_value=False), \
+             patch.object(tex.time, 'monotonic', return_value=20):
+            self.assertFalse(viewer.unused(True, 'main.pdf'))
+            self.assertFalse(viewer.unused(False, 'main.pdf'))
+        with patch.object(tex, 'pdf_is_open', return_value=False), \
+             patch.object(tex.time, 'monotonic', return_value=26):
+            self.assertTrue(viewer.unused(False, 'main.pdf'))
+            self.assertFalse(viewer.unused(False, 'main.pdf', 'new-request'))
+        for state in (True, None):
+            with patch.object(tex, 'pdf_is_open', return_value=state), \
+                 patch.object(tex.time, 'monotonic', return_value=40):
+                self.assertFalse(viewer.unused(False, 'main.pdf'))
+                self.assertIsNone(viewer.closed_since)
+
+    def test_sumatra_tab_detection_is_scoped_and_includes_background_tabs(self):
+        record = dict(command='SumatraPDF.exe -appdata "C:/preview"', windows=[
+            dict(title='other.pdf - SumatraPDF', tabs=['Home', 'main.pdf', 'other.pdf'])])
+        with patch.object(tex, 'sumatra_windows', return_value=[record]), \
+             patch.object(tex, 'windows_path', return_value='C:/preview'):
+            self.assertTrue(tex.pdf_is_open(self.root, 'main.pdf'))
+            record['windows'][0]['tabs'].remove('main.pdf')
+            self.assertFalse(tex.pdf_is_open(self.root, 'main.pdf'))
+            record['command'] = 'SumatraPDF.exe -appdata "C:/another-preview"'
+            record['windows'][0]['tabs'].append('main.pdf')
+            self.assertFalse(tex.pdf_is_open(self.root, 'main.pdf'))
+        with patch.object(tex, 'sumatra_windows', return_value=None):
+            self.assertIsNone(tex.pdf_is_open(self.root, 'main.pdf'))
+
+    def test_local_watcher_exits_when_both_consumers_are_gone(self):
+        path = tex.CACHE / 'requests' / (tex.key(str(self.pdf)) + '.json')
+        tex.write_json(path, dict(self.data, remote=False))
+        self.socket.unlink()
+        with patch.object(tex.Viewer, 'unused', return_value=True) as unused, \
+             patch.object(tex.subprocess, 'Popen') as launch:
+            tex.watch(path)
+            unused.assert_called_once_with(False, self.pdf.name, self.data['id'])
+            launch.assert_not_called()
+        self.assertTrue(path.exists())  # Preserve history so a later editor can resume.
+
     def test_unavailable_viewer_rejects_local_request_before_spawning(self):
         for reason in ('SumatraPDF missing', 'Windows interop unavailable', 'executable cannot run'):
             with self.subTest(reason=reason), \
@@ -72,6 +164,58 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(launch.call_count, 1)
             viewer.update(dict(self.data, id='two'), self.pdf)
             self.assertEqual(launch.call_count, 2)
+
+    def test_local_watcher_delivers_external_rebuild_after_editor_exit_until_stopped(self):
+        path = tex.CACHE / 'requests' / (tex.key(str(self.pdf)) + '.json')
+        tex.write_json(path, dict(self.data, remote=False))
+        self.socket.unlink()
+        original = self.pdf.read_bytes()
+        rebuilt = b'%PDF-1.5\nexternal rebuild\n%%EOF\n'
+        sync = self.pdf.with_suffix('.synctex.gz')
+        target = self.root / 'win-cache' / tex.key(str(path)) / self.pdf.name
+        ticks = 0
+
+        def advance(_):
+            nonlocal ticks
+            ticks += 1
+            if ticks == 2:
+                self.assertEqual(target.read_bytes(), original)
+                self.pdf.unlink()  # A clean build can temporarily remove its output.
+            elif ticks == 3:
+                self.pdf.write_bytes(b'%PDF-1.5\npartial')
+            elif ticks == 5:
+                self.assertEqual(target.read_bytes(), original)
+                self.pdf.write_bytes(rebuilt)
+                sync.write_bytes(gzip.compress(b'SyncTeX Version:1\n'))
+            elif ticks == 7:
+                self.assertEqual(target.read_bytes(), rebuilt)
+                self.assertTrue(target.with_suffix('.synctex.gz').exists())
+                tex.stop(self.pdf)
+            elif ticks > 7:
+                self.fail('Watcher did not stop after removing the subscription')
+
+        with patch.object(tex.time, 'sleep', side_effect=advance), \
+             patch.object(tex.subprocess, 'Popen') as launch:
+            launch.return_value.poll.return_value = None
+            tex.watch(path)
+            self.assertEqual(launch.call_count, 1)  # Rebuilds update, never reopen.
+        self.assertEqual(ticks, 7)
+
+    def test_subscribed_remote_pdf_keeps_updating_after_editor_exit(self):
+        ident = tex.key(str(self.pdf))
+        path = tex.CACHE / 'requests' / (ident + '.json')
+        tex.write_json(path, self.data)
+        pending = {}
+        tex.poll({}, pending)
+        item = tex.poll({}, pending)[0]
+        known = {ident: item['stamp']}
+        self.socket.unlink()
+        self.pdf.write_bytes(b'%PDF-1.5\nexternal rebuild\n%%EOF\n')
+        self.assertNotIn('files', tex.poll(known, pending)[0])
+        self.assertIn('files', tex.poll(known, pending)[0])
+        self.assertEqual(tex.poll({}, {}), [])  # A new bridge cannot revive it.
+        tex.stop(self.pdf)
+        self.assertEqual(tex.poll(known, pending), [])
 
     def test_stable_snapshot_manual_build_and_missing_synctex(self):
         tex.write_json(tex.CACHE / 'requests' / 'project.json', self.data)

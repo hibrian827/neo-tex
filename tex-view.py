@@ -11,6 +11,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 from pathlib import Path, PureWindowsPath
 import shlex
 import signal
@@ -69,7 +70,15 @@ def request(data, resume=False):
     if not data.get('remote'):
         require_sumatra()
     data.update(id=uuid.uuid4().hex, time=time.time(), reconnect=resume)
-    write_json(path, data)
+    # Keep every editor that has attached to this document, not only the latest.
+    with (directory(CACHE / 'locks') / ('request-' + key(data['pdf']))).open('a') as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        previous = json.loads(path.read_text()) if path.exists() else {}
+        editors = {entry['server']: entry for entry in previous.get('editors', [previous])
+                   if entry.get('server') and Path(entry['server']).exists()}
+        editors[data['server']] = {name: data[name] for name in ('server', 'main') if name in data}
+        data['editors'] = list(editors.values())
+        write_json(path, data)
     if not data.get('remote'):
         with (CACHE / 'local.log').open('ab') as log:
             subprocess.Popen([SELF, 'watch', str(path)], stdin=subprocess.DEVNULL,
@@ -149,8 +158,44 @@ def sumatra_callback(filename, line):
     raise ValueError('No LaTeX preview owns this SyncTeX source: ' + filename)
 
 
+EDITOR_CHECKS = {}
+
+
+def editor_references(entry):
+    server = entry['server']
+    if not Path(server).exists():
+        return False
+    if not entry.get('main'):  # Compatibility with requests from older editors.
+        return True
+    identity = (server, entry['main'])
+    cached = EDITOR_CHECKS.get(identity)
+    if cached and time.monotonic() - cached[0] < 5:
+        return cached[1]
+    lua = ('(function() for _, b in ipairs(vim.api.nvim_list_bufs()) do '
+           'local s = vim.b[b].vimtex; '
+           'if vim.api.nvim_buf_is_loaded(b) and s and s.tex == _A then return 1 end '
+           'end return 0 end)()')
+    expression = "luaeval(" + json.dumps(lua) + ", json_decode('" + json.dumps(entry['main']).replace("'", "''") + "'))"
+    try:
+        result = subprocess.run(['nvim', '--server', server, '--remote-expr', expression],
+                                capture_output=True, text=True, timeout=3)
+        # A busy editor or unavailable RPC is not evidence that the reference is gone.
+        alive = result.returncode != 0 or result.stdout.strip() != '0'
+    except (OSError, subprocess.SubprocessError):
+        alive = True
+    EDITOR_CHECKS[identity] = (time.monotonic(), alive)
+    return alive
+
+
 def serving(data):
-    return Path(data['server']).exists() or time.time() < data.get('drain_until', 0)
+    return (time.time() < data.get('drain_until', 0)
+            or any(editor_references(entry) for entry in data.get('editors', [data])))
+
+
+def stop(pdf):
+    """Forget a preview subscription without closing its PDF window."""
+    path = CACHE / 'requests' / (key(str(pdf.absolute())) + '.json')
+    path.unlink(missing_ok=True)
 
 
 def finish(data):
@@ -304,6 +349,137 @@ def sumatra_editor(folder, metadata):
     return editor
 
 
+# Read tab names without activating windows or sending input to the user's desktop.
+SUMATRA_WINDOWS_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$ae = [System.Windows.Automation.AutomationElement]
+$scope = [System.Windows.Automation.TreeScope]
+Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+using System.Collections.Generic;
+public static class NeoTexTabs {
+ delegate bool EnumProc(IntPtr hwnd, IntPtr data);
+ [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback, IntPtr data);
+ [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumProc callback, IntPtr data);
+ [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+ [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr hwnd, StringBuilder text, int max);
+ [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp, uint flags, uint timeout, out IntPtr result);
+ [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+ [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+ [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr VirtualAllocEx(IntPtr process, IntPtr address, UIntPtr size, uint type, uint protect);
+ [DllImport("kernel32.dll")] static extern bool VirtualFreeEx(IntPtr process, IntPtr address, UIntPtr size, uint type);
+ [DllImport("kernel32.dll", SetLastError=true)] static extern bool WriteProcessMemory(IntPtr process, IntPtr address, byte[] bytes, UIntPtr size, out UIntPtr done);
+ [DllImport("kernel32.dll", SetLastError=true)] static extern bool ReadProcessMemory(IntPtr process, IntPtr address, byte[] bytes, UIntPtr size, out UIntPtr done);
+ public static string[] Read(int pid) {
+  if(IntPtr.Size!=8) throw new Exception("A 64-bit PowerShell is required");
+  var controls=new List<IntPtr>();
+  EnumWindows((window,unused)=>{
+   uint owner; GetWindowThreadProcessId(window,out owner);
+   if(owner==(uint)pid) EnumChildWindows(window,(child,ignored)=>{
+    var name=new StringBuilder(256); GetClassName(child,name,256);
+    if(name.ToString()=="SysTabControl32") controls.Add(child);
+    return true;
+   },IntPtr.Zero);
+   return true;
+  },IntPtr.Zero);
+  if(controls.Count==0) return new string[0];
+  IntPtr process=OpenProcess(0x438,false,pid);
+  if(process==IntPtr.Zero) throw new Exception("Cannot read SumatraPDF tabs");
+  IntPtr memory=IntPtr.Zero;
+  try {
+   memory=VirtualAllocEx(process,IntPtr.Zero,(UIntPtr)32832,0x3000,4);
+   if(memory==IntPtr.Zero) throw new Exception("Cannot allocate tab query buffer");
+   var names=new List<string>();
+   foreach(var control in controls) {
+    IntPtr count;
+    if(SendMessageTimeout(control,0x1304,IntPtr.Zero,IntPtr.Zero,2,1000,out count)==IntPtr.Zero) throw new Exception("Tab query timed out");
+    if(count.ToInt64()<0 || count.ToInt64()>1000) throw new Exception("Invalid tab count");
+    for(int index=0;index<count.ToInt32();index++) {
+     // TCITEMW for the 64-bit SumatraPDF installed by neo-tex.
+     var item=new byte[40]; item[0]=1;
+     Array.Copy(BitConverter.GetBytes(memory.ToInt64()+64),0,item,16,8);
+     Array.Copy(BitConverter.GetBytes(16384),0,item,24,4);
+     UIntPtr done;
+     if(!WriteProcessMemory(process,memory,item,(UIntPtr)item.Length,out done)) throw new Exception("Cannot prepare tab query");
+     IntPtr result;
+     if(SendMessageTimeout(control,0x133c,(IntPtr)index,memory,2,1000,out result)==IntPtr.Zero || result==IntPtr.Zero) throw new Exception("Cannot read tab label");
+     var text=new byte[32768];
+     if(!ReadProcessMemory(process,new IntPtr(memory.ToInt64()+64),text,(UIntPtr)text.Length,out done)) throw new Exception("Cannot read tab text");
+     names.Add(Encoding.Unicode.GetString(text).Split('\0')[0]);
+    }
+   }
+   return names.ToArray();
+  } finally {if(memory!=IntPtr.Zero) VirtualFreeEx(process,memory,UIntPtr.Zero,0x8000); CloseHandle(process);}
+ }
+}
+'@
+
+$records = @(Get-CimInstance Win32_Process -Filter "Name='SumatraPDF.exe'" | ForEach-Object {
+    $proc = $_
+    $nativeTabs = @([NeoTexTabs]::Read([int]$proc.ProcessId))
+    $condition = New-Object System.Windows.Automation.PropertyCondition($ae::ProcessIdProperty, [int]$proc.ProcessId)
+    $windows = @($ae::RootElement.FindAll($scope::Children, $condition) | ForEach-Object {
+        $window = $_
+        $tabsCondition = New-Object System.Windows.Automation.PropertyCondition($ae::ControlTypeProperty, [System.Windows.Automation.ControlType]::TabItem)
+        $tabs = @($window.FindAll($scope::Descendants, $tabsCondition) | ForEach-Object { $_.Current.Name })
+        @{title=$window.Current.Name; tabs=@($tabs + $nativeTabs)}
+    })
+    @{command=$proc.CommandLine; windows=$windows}
+})
+ConvertTo-Json -Depth 5 -Compress -InputObject $records
+"""
+WINDOW_CHECK = None
+
+
+def sumatra_windows():
+    global WINDOW_CHECK
+    if WINDOW_CHECK and time.monotonic() - WINDOW_CHECK[0] < 5:
+        return WINDOW_CHECK[1]
+    try:
+        encoded = base64.b64encode(SUMATRA_WINDOWS_SCRIPT.encode('utf-16le')).decode()
+        result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+                                capture_output=True, text=True, check=True, timeout=5)
+        records = json.loads(result.stdout)
+        if not isinstance(records, list):
+            raise ValueError('Invalid SumatraPDF window snapshot')
+    except (OSError, ValueError, subprocess.SubprocessError):
+        records = None
+    WINDOW_CHECK = (time.monotonic(), records)
+    return records
+
+
+def pdf_is_open(folder, filename):
+    records = sumatra_windows()
+    if records is None:
+        return None
+    profile = windows_path(folder).casefold()
+    found = []
+    for record in records:
+        command = record.get('command')
+        if command is None:
+            return None  # Inaccessible process: don't assume its PDFs are closed.
+        match = re.search(r'(?:^|\s)-appdata\s+(?:"([^"]+)"|(\S+))', command, re.I)
+        if match and (match[1] or match[2]).casefold() == profile:
+            found.extend(record['windows'])
+    expected = filename.casefold()
+    unknown = False
+    for window in found:
+        tabs = window['tabs']
+        if any(PureWindowsPath(name).name.casefold() == expected for name in tabs):
+            return True
+        title = window['title'].casefold()
+        if title.startswith(expected + ' - ') or title == expected:
+            return True
+        if not tabs and title not in ('sumatrapdf', ''):
+            unknown = True  # Custom title/provider: preserve the subscription.
+    return None if unknown else False
+
+
 class Viewer:
     def __init__(self, ident, host=None):
         self.folder = directory(CACHE / 'viewers' / ident)
@@ -316,9 +492,31 @@ class Viewer:
         self.windows_stamp = None
         self.windows_folder = None
         self.launchers = []
+        self.started = time.monotonic()
+        self.closed_since = None
 
     def reap(self):
         self.launchers = [process for process in self.launchers if process.poll() is None]
+
+    def unused(self, editor_active, filename, request_id=None):
+        if request_id is not None and request_id != self.last_request:
+            self.started = time.monotonic()
+            self.closed_since = None
+            return False
+        if editor_active or time.monotonic() - self.started < 10:
+            self.closed_since = None
+            return False
+        try:
+            folder = self.windows_folder or (windows_cache() / self.folder.name)
+            opened = pdf_is_open(folder, filename)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            opened = None
+        if opened is not False:
+            self.closed_since = None
+            return False
+        if self.closed_since is None:
+            self.closed_since = time.monotonic()
+        return time.monotonic() - self.closed_since >= 5
 
     def update_sumatra(self, data, pdf, record, metadata):
         # Keep PDFs on NTFS: Windows file watching and SyncTeX path handling then
@@ -399,29 +597,33 @@ def watch(path):
         guard = lock(key(str(path)))
     if not guard:
         return
-    viewer = Viewer(key(str(path)))
-    previous = published = None
-    while True:
-        viewer.reap()
-        data = json.loads(path.read_text())
-        if not serving(data):
-            return
-        source = Path(data['pdf'])
-        paths = [source, source.with_suffix('.synctex.gz')]
-        pdf = viewer.folder / source.name
-        try:
-            stamp = fingerprint(paths)
-            if stamp == previous and stamp != published and stamp[0]:
-                contents = [p.read_bytes() if p.exists() else None for p in paths]
-                if fingerprint(paths) == stamp and complete_pdf(contents[0]):
-                    publish(pdf, contents)
-                    published = stamp
-            previous = stamp
-            if published is not None:
-                viewer.update(data, pdf)
-        except OSError as error:
-            print(error, file=sys.stderr, flush=True)
-        time.sleep(0.5)
+    with guard:
+        viewer = Viewer(key(str(path)))
+        previous = published = None
+        while True:
+            viewer.reap()
+            try:
+                data = json.loads(path.read_text())
+            except FileNotFoundError:
+                return
+            if viewer.unused(serving(data), Path(data['pdf']).name, data['id']):
+                return
+            source = Path(data['pdf'])
+            paths = [source, source.with_suffix('.synctex.gz')]
+            pdf = viewer.folder / source.name
+            try:
+                stamp = fingerprint(paths)
+                if stamp == previous and stamp != published and stamp[0]:
+                    contents = [p.read_bytes() if p.exists() else None for p in paths]
+                    if fingerprint(paths) == stamp and complete_pdf(contents[0]):
+                        publish(pdf, contents)
+                        published = stamp
+                previous = stamp
+                if published is not None:
+                    viewer.update(data, pdf)
+            except OSError as error:
+                print(error, file=sys.stderr, flush=True)
+            time.sleep(0.5)
 
 
 def complete_pdf(content):
@@ -446,14 +648,17 @@ def poll(known, pending, ignored=()):
     for path in directory(CACHE / 'requests').glob('*.json'):
         try:
             data = json.loads(path.read_text())
-            if data['id'] in ignored or not serving(data) or not data.get('remote'):
+            # A connected bridge keeps subscribed documents fresh after editor exit.
+            # Fresh bridges still ignore abandoned requests from former editors.
+            if (data['id'] in ignored or not data.get('remote')
+                    or (not serving(data) and path.stem not in known)):
                 continue
             pdf = Path(data['pdf'])
             paths = [pdf, pdf.with_suffix('.synctex.gz')]
             stamp = fingerprint(paths)
             if not stamp[0]:
                 continue
-            item = dict(key=path.stem, request=data, stamp=stamp)
+            item = dict(key=path.stem, request=data, stamp=stamp, editor_active=serving(data))
             # Wait for two matching polls, then verify again after reading both.
             if stamp != known.get(path.stem) and pending.get(path.stem) == stamp:
                 contents = [p.read_bytes() if p.exists() else None for p in paths]
@@ -507,6 +712,11 @@ def bridge(host, managed=False):
                         continue
                     ident = key(connection_name(host) + ':' + item['key'])
                     viewer = viewers.setdefault(ident, Viewer(ident, host))
+                    if viewer.unused(item.get('editor_active', True), Path(data['pdf']).name, data['id']):
+                        ignored.add(data['id'])
+                        known.pop(item['key'], None)
+                        viewers.pop(ident, None)
+                        continue
                     pdf = viewer.folder / Path(data['pdf']).name
                     if 'files' in item:
                         # Publish SyncTeX before the PDF triggers the viewer reload.
@@ -656,6 +866,7 @@ def main():
     sub.add_parser('inverse')
     sub.add_parser('install-sumatra')
     p = sub.add_parser('watch'); p.add_argument('path', type=Path)
+    p = sub.add_parser('stop'); p.add_argument('pdf', type=Path)
     p = sub.add_parser('bridge'); p.add_argument('host'); p.add_argument('--managed', action='store_true')
     p = sub.add_parser('connect'); p.add_argument('args', nargs=argparse.REMAINDER)
     p = sub.add_parser('ssh'); p.add_argument('host'); p.add_argument('args', nargs=argparse.REMAINDER)
@@ -670,6 +881,8 @@ def main():
         finish(json.load(sys.stdin))
     elif args.command == 'watch':
         watch(args.path)
+    elif args.command == 'stop':
+        stop(args.pdf)
     elif args.command == 'bridge':
         bridge(args.host, managed=args.managed)
     elif args.command == 'connect':
