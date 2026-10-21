@@ -59,7 +59,7 @@ def lock(name):
 
 
 def request(data, resume=False):
-    for field in ('pdf', 'root', 'source', 'server'):
+    for field in ('pdf', 'root', 'source') + (() if data.get('terminal') else ('server',)):
         if not isinstance(data.get(field), str) or not data[field]:
             raise ValueError('Missing request field: ' + field)
     path = directory(CACHE / 'requests') / (key(data['pdf']) + '.json')
@@ -76,7 +76,19 @@ def request(data, resume=False):
         previous = json.loads(path.read_text()) if path.exists() else {}
         editors = {entry['server']: entry for entry in previous.get('editors', [previous])
                    if entry.get('server') and Path(entry['server']).exists()}
-        editors[data['server']] = {name: data[name] for name in ('server', 'main') if name in data}
+        if data.get('terminal'):
+            # Terminal viewing must not detach an already-connected editor.
+            if editors:
+                server = previous.get('server')
+                server = server if server in editors else next(iter(editors))
+                for name in ('root', 'source', 'line', 'pane', 'tmux'):
+                    if name in previous:
+                        data[name] = previous[name]
+                data.update(editors[server])
+            # Give a remote bridge time to subscribe before a viewer exists.
+            data['drain_until'] = time.time() + 15
+        else:
+            editors[data['server']] = {name: data[name] for name in ('server', 'main') if name in data}
         data['editors'] = list(editors.values())
         write_json(path, data)
     if not data.get('remote'):
@@ -84,6 +96,32 @@ def request(data, resume=False):
             subprocess.Popen([SELF, 'watch', str(path)], stdin=subprocess.DEVNULL,
                              stdout=log, stderr=log, start_new_session=True)
     return True
+
+
+def open_pdf(filename=None):
+    root = source = None
+    if filename is None:
+        config = next((folder / '.texbuild.json' for folder in (Path.cwd(), *Path.cwd().parents)
+                       if (folder / '.texbuild.json').is_file()), None)
+        if config:
+            settings = json.loads(config.read_text())
+            for field in ('main', 'pdf'):
+                if not isinstance(settings.get(field), str) or not settings[field].strip():
+                    raise ValueError(f'{config}: {field} must be a nonempty string.')
+            root = config.parent
+            filename = root / settings['pdf']
+            source = root / settings['main']
+        else:
+            files = list(Path.cwd().glob('*.pdf'))
+            if len(files) != 1:
+                raise ValueError('Specify a PDF file, or add .texbuild.json with main and pdf paths.')
+            filename = files[0]
+    pdf = filename.expanduser().resolve()
+    data = dict(pdf=str(pdf), root=str(root or pdf.parent), source=str(source or pdf.with_suffix('.tex')),
+                server='', line=1, remote=bool(os.environ.get('SSH_CONNECTION')), terminal=True)
+    request(data)
+    if data['remote']:
+        print('PDF requested through the WSL bridge. Keep the bridge connected for refreshes.')
 
 
 def focus(tmux, pane):
@@ -94,6 +132,8 @@ def focus(tmux, pane):
 
 
 def inverse(data, filename, line):
+    if not data.get('server') or not Path(data['server']).exists():
+        raise RuntimeError('No Neovim editor is attached. Open the source in Neovim and run :pdf to attach it.')
     # A copied SyncTeX file may resolve relative inputs under the local cache.
     source = Path(filename)
     cache_dir = data.get('cache_dir')
@@ -162,7 +202,9 @@ EDITOR_CHECKS = {}
 
 
 def editor_references(entry):
-    server = entry['server']
+    server = entry.get('server')
+    if not server:
+        return False
     if not Path(server).exists():
         return False
     if not entry.get('main'):  # Compatibility with requests from older editors.
@@ -865,6 +907,7 @@ def main():
     sub.add_parser('serve')
     sub.add_parser('inverse')
     sub.add_parser('install-sumatra')
+    p = sub.add_parser('open', help='Open an existing PDF and watch external rebuilds'); p.add_argument('pdf', type=Path, nargs='?')
     p = sub.add_parser('watch'); p.add_argument('path', type=Path)
     p = sub.add_parser('stop'); p.add_argument('pdf', type=Path)
     p = sub.add_parser('bridge'); p.add_argument('host'); p.add_argument('--managed', action='store_true')
@@ -873,7 +916,9 @@ def main():
     p = sub.add_parser('callback'); p.add_argument('path'); p.add_argument('filename'); p.add_argument('line', type=int)
     p = sub.add_parser('sumatra-callback'); p.add_argument('filename'); p.add_argument('line', type=int)
     args = parser.parse_args()
-    if args.command == 'request':
+    if args.command == 'open':
+        open_pdf(args.pdf)
+    elif args.command == 'request':
         request(json.load(sys.stdin))
     elif args.command == 'resume':
         print('1' if request(json.load(sys.stdin), resume=True) else '0')

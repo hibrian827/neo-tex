@@ -14,6 +14,7 @@ cd neo-tex
 mkdir -p ~/.local/bin ~/.config/nvim/lua ~/.config/nvim/autoload/vimtex/view
 ln -s "$PWD/tex-view.py" ~/.local/bin/tex-view
 ln -s "$PWD/tex-ssh" ~/.local/bin/tex-ssh
+ln -s "$PWD/pdf" ~/.local/bin/pdf
 ln -s "$PWD/nvim/lua/neo_tex" ~/.config/nvim/lua/neo_tex
 ln -s "$PWD/nvim/autoload/vimtex/view/texbridge.vim" ~/.config/nvim/autoload/vimtex/view/texbridge.vim
 ```
@@ -38,6 +39,17 @@ tex-view install-sumatra
 This installs a portable viewer without changing Windows file associations. SumatraPDF is required on the viewing machine; missing viewer or Windows interop produces an error before a watcher or bridge starts. There is no Linux viewer fallback.
 
 ## Use
+
+From a terminal:
+
+```sh
+pdf p.pdf
+```
+
+This opens an existing PDF and watches external rebuilds without Neovim. With no
+filename, `pdf` uses `.texbuild.json`, or the only PDF in the current directory.
+It is shorthand for `tex-view open`. Opening a connected PDF keeps its editor
+attached; otherwise, open its source in Neovim and run `:pdf` for inverse search.
 
 Open a `.tex` file in Neovim:
 
@@ -100,7 +112,7 @@ Install neo-tex and VimTeX on both machines. Keep the paper and `.texbuild.json`
 
 ```sh
 tex-ssh my-server
-# Open the remote paper in Neovim and run :pdf.
+# On the server: pdf p.pdf, or open the source in Neovim and run :pdf.
 ```
 
 The bridge runs alongside SSH and stops when the connection closes. For an existing SSH session, run `tex-view bridge my-server` in another local terminal; stop it with Ctrl+C.
@@ -108,7 +120,7 @@ The bridge runs alongside SSH and stops when the connection closes. For an exist
 To start bridges with ordinary `ssh`, add this to local WSL `~/.zshrc`:
 
 ```zsh
-alias pdf='tex-view bridge'
+alias pdf='tex-view open'
 ssh() {
   if [[ -t 0 && -t 1 ]]; then
     tex-view connect -- "$@"
@@ -151,6 +163,7 @@ Run from this checkout after installation:
 ```sh
 python3 tests/test-tex-view.py
 python3 tests/test-ssh-pdf-bridge.py
+python3 tests/test-terminal-pdf.py
 python3 tests/test-tex-pdf-command.py --make
 nvim --headless -u NONE -l tests/test-tex-navigation.lua
 ```

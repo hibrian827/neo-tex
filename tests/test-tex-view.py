@@ -42,6 +42,91 @@ class BridgeTests(unittest.TestCase):
         self.data = dict(pdf=str(self.pdf), root=str(self.root), source=str(self.root / "chapter's file.tex"),
                          server=str(self.socket), line=3, remote=True, id='one', time=1)
 
+    def test_terminal_open_without_editor_starts_watching_but_keeps_no_editor_reference(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(tex.subprocess, 'Popen') as launch:
+            tex.open_pdf(self.pdf)
+        path = tex.CACHE / 'requests' / (tex.key(str(self.pdf)) + '.json')
+        data = json.loads(path.read_text())
+        self.assertFalse(data['remote'])
+        self.assertEqual(data['editors'], [])
+        self.assertEqual(data['server'], '')
+        self.assertEqual(launch.call_args.args[0][1:], ['watch', str(path)])
+        with patch.object(tex.time, 'time', return_value=data['drain_until'] + 1):
+            self.assertFalse(tex.serving(data))  # Viewer state alone now keeps the watcher alive.
+        with patch.object(tex.subprocess, 'run') as invoke:
+            with self.assertRaisesRegex(RuntimeError, 'No Neovim editor is attached'):
+                tex.inverse(data, str(self.pdf.with_suffix('.tex')), 1)
+            invoke.assert_not_called()
+
+    def test_terminal_open_preserves_attached_editor_and_resume_attaches_to_editorless_pdf(self):
+        tex.request(dict(self.data))
+        with patch.dict(os.environ, {'SSH_CONNECTION': 'test'}), patch.object(tex.subprocess, 'Popen') as launch:
+            tex.open_pdf(self.pdf)
+            launch.assert_not_called()
+        path = tex.CACHE / 'requests' / (tex.key(str(self.pdf)) + '.json')
+        data = json.loads(path.read_text())
+        self.assertTrue(data['remote'])
+        self.assertEqual(data['server'], str(self.socket))
+        self.assertEqual(data['source'], self.data['source'])
+        self.assertEqual(data['editors'], [{'server': str(self.socket)}])
+        self.socket.unlink()
+        with patch.dict(os.environ, {'SSH_CONNECTION': 'test'}):
+            tex.open_pdf(self.pdf)
+        self.assertEqual(json.loads(path.read_text())['editors'], [])
+        self.socket.touch()
+        self.assertTrue(tex.request(dict(self.data), resume=True))
+        self.assertEqual(json.loads(path.read_text())['server'], str(self.socket))
+
+    def test_terminal_open_defaults_to_config_or_single_pdf_and_rejects_ambiguity(self):
+        with patch.object(tex.Path, 'cwd', return_value=self.root), \
+             patch.dict(os.environ, {}, clear=True), patch.object(tex.subprocess, 'Popen'):
+            tex.open_pdf()
+            config = self.root / '.texbuild.json'
+            config.write_text(json.dumps({'main': "chapter's file.tex", 'pdf': self.pdf.name, 'command': 'make'}))
+            tex.open_pdf()
+            path = tex.CACHE / 'requests' / (tex.key(str(self.pdf)) + '.json')
+            self.assertEqual(json.loads(path.read_text())['source'], self.data['source'])
+            config.unlink()
+            (self.root / 'second.pdf').write_bytes(self.pdf.read_bytes())
+            with self.assertRaisesRegex(ValueError, 'Specify a PDF file'):
+                tex.open_pdf()
+
+    def test_terminal_open_cli_and_wrapper_preserve_paths_and_missing_pdf_starts_nothing(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(tex.subprocess, 'Popen') as launch:
+            with self.assertRaisesRegex(ValueError, 'Compile the document'):
+                tex.open_pdf(self.root / 'missing.pdf')
+            launch.assert_not_called()
+            with patch.object(sys, 'argv', ['tex-view', 'open', str(self.pdf)]):
+                self.assertEqual(tex.main(), 0)
+            self.assertEqual(launch.call_count, 1)
+        binary = self.root / 'bin'
+        binary.mkdir()
+        fake = binary / 'tex-view'
+        fake.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$PDF_TEST_ARGS"\n')
+        fake.chmod(0o700)
+        output = self.root / 'arguments'
+        wrapper = Path(__file__).resolve().parents[1] / 'pdf'
+        subprocess.run([str(wrapper), str(self.pdf)], check=True,
+                       env=dict(os.environ, PATH=str(binary) + ':' + os.environ['PATH'], PDF_TEST_ARGS=str(output)))
+        self.assertEqual(output.read_text().splitlines(), ['open', str(self.pdf)])
+
+    def test_remote_terminal_open_is_discovered_without_editor_then_streams_external_rebuilds(self):
+        with patch.dict(os.environ, {'SSH_CONNECTION': 'test'}):
+            tex.open_pdf(self.pdf)
+        ident = tex.key(str(self.pdf))
+        path = tex.CACHE / 'requests' / (ident + '.json')
+        data = json.loads(path.read_text())
+        pending = {}
+        tex.poll({}, pending)
+        item = tex.poll({}, pending)[0]
+        self.assertIn('files', item)
+        known = {ident: item['stamp']}
+        with patch.object(tex.time, 'time', return_value=data['drain_until'] + 1):
+            self.assertEqual(tex.poll({}, {}), [])
+            self.pdf.write_bytes(b'%PDF-1.5\nrebuilt from a remote terminal\n%%EOF\n')
+            tex.poll(known, pending)
+            self.assertIn('files', tex.poll(known, pending)[0])
+
     def test_all_attached_editors_are_retained(self):
         second = self.root / 'second.sock'
         second.touch()
